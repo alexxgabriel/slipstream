@@ -21,16 +21,25 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          meson \
           ninja-build \
           cmake \
           gcc-arm-linux-gnueabi \
           g++-arm-linux-gnueabi \
           binutils-arm-linux-gnueabi \
           pkg-config \
-          libssl-dev
+          libssl-dev \
+          python3-pip  # Añadido para instalar meson actualizado
 
-    # 3. DEBUG DEL ENTORNO (NUEVO)
+    # 3. INSTALAR MESON ACTUALIZADO (NUEVO - ELIMINA EL ERROR DE VERSIÓN)
+    - name: Instalar Meson actualizado
+      run: |
+        echo "=== Instalando Meson 1.4.0 ==="
+        pip3 install --upgrade pip
+        pip3 install meson==1.4.0
+        echo "Versión de Meson instalada:"
+        meson --version
+
+    # 4. DEBUG DEL ENTORNO
     - name: Debug del entorno
       run: |
         echo "=== VERIFICACIÓN DEL ENTORNO ==="
@@ -54,7 +63,7 @@ jobs:
           arm-linux-gnueabi-gcc -march=armv7-a -I$INCLUDE_PATH -c test_ssl.c -o /dev/null 2>&1 && echo "✅ Funciona" || echo "❌ Falló"
         done
 
-    # 4. Parchear archivos para quitar -Werror
+    # 5. Parchear archivos para quitar -Werror
     - name: Parchear archivos para quitar -Werror
       run: |
         echo "=== Parcheando archivos ==="
@@ -71,7 +80,7 @@ jobs:
           sed -i 's/-Werror//g' "$file"
         done
 
-    # 5. Configurar con Meson (CORREGIDO)
+    # 6. Configurar con Meson (CORREGIDO)
     - name: Configurar con Meson
       run: |
         echo "=== Configurando con Meson ==="
@@ -100,7 +109,7 @@ jobs:
           -Dwerror=false \
           -Dbuildtype=debug
 
-    # 6. Compilar proyecto
+    # 7. Compilar proyecto
     - name: Compilar proyecto
       run: |
         echo "=== Compilando ==="
@@ -113,7 +122,7 @@ jobs:
           cd build && ninja -k 5 || echo "Continuando..."
         fi
 
-    # 7. Verificar resultado
+    # 8. Verificar resultado
     - name: Verificar binarios
       run: |
         echo "=== Verificando binarios ==="
@@ -137,7 +146,7 @@ jobs:
           exit 1
         fi
 
-    # 8. Subir binarios
+    # 9. Subir binarios
     - name: Subir binarios
       uses: actions/upload-artifact@v4
       with:

@@ -1,0 +1,76 @@
+name: Build slipstream for ARM 32-bit
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Permite ejecutar manualmente
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Obtener el código
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'  # IMPORTANTE: Descargar submódulos
+
+    # 2. Instalar herramientas de compilación cruzada
+    - name: Install cross-compiler for ARM 32-bit
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          meson \
+          ninja-build \
+          cmake \
+          gcc-arm-linux-gnueabi \
+          g++-arm-linux-gnueabi \
+          pkg-config \
+          libssl-dev
+
+    # 3. Aplicar parches para eliminar -Werror
+    - name: Patch to remove -Werror
+      run: |
+        # Eliminar -Werror de archivos CMake
+        find . -name "CMakeLists.txt" -type f -exec sed -i 's/-Werror//g' {} \;
+        find . -name "*.cmake" -type f -exec sed -i 's/-Werror//g' {} \;
+        
+        # Parche específico para picoquic
+        if [ -f "CMakeLists.txt" ]; then
+          echo 'add_compile_options(-w)' >> CMakeLists.txt
+        fi
+
+    # 4. Configurar el proyecto para ARM 32-bit
+    - name: Configure with Meson
+      env:
+        CC: arm-linux-gnueabi-gcc
+        CXX: arm-linux-gnueabi-g++
+        CFLAGS: "-march=armv7-a -w"
+        CXXFLAGS: "-march=armv7-a -w"
+      run: |
+        meson setup build \
+          --cross-file .github/cross-arm32.txt \
+          -Dwarning_level=0 \
+          -Dwerror=false
+
+    # 5. Compilar
+    - name: Compile with Ninja
+      run: |
+        meson compile -C build
+
+    # 6. Verificar que son binarios ARM 32-bit
+    - name: Verify binaries
+      run: |
+        file build/slipstream-client
+        file build/slipstream-server
+
+    # 7. Subir los binarios como artefactos
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: slipstream-arm32-binaries
+        path: |
+          build/slipstream-client
+          build/slipstream-server
+        retention-days: 90

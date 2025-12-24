@@ -17,7 +17,7 @@ jobs:
         submodules: 'recursive'
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 2. Instalar herramientas
+    # 2. Instalar herramientas básicas
     - name: Instalar herramientas para compilar en ARM
       run: |
         sudo apt-get update
@@ -37,59 +37,25 @@ jobs:
         pip3 install --upgrade pip
         pip3 install meson==1.4.0
 
-    # 4. SOLUCIÓN MEJOR: Simular OpenSSL sin crear archivos en sistema
-    - name: Preparar entorno OpenSSL
+    # 4. DEBUG: Ver qué hay en el proyecto antes de compilar
+    - name: Analizar estructura del proyecto
       run: |
-        echo "=== Preparando OpenSSL para cross-compilación ==="
-        
-        # Crear directorio local para headers de OpenSSL
-        mkdir -p openssl-arm/include/openssl
-        
-        # Copiar headers locales
-        cp -r /usr/include/openssl/* openssl-arm/include/openssl/ 2>/dev/null || true
-        
-        # Crear opensslconf.h simple localmente (sin sudo)
-        cat > openssl-arm/include/openssl/opensslconf.h << 'EOF'
-        /* opensslconf.h simplificado para ARM */
-        #ifndef OPENSSL_CONF_H
-        #define OPENSSL_CONF_H
-        
-        #define OPENSSL_NO_ASM
-        #define OPENSSL_NO_INLINE_ASM
-        #define OPENSSL_THREADS
-        #define OPENSSL_API_COMPAT 0x10100000L
-        
-        /* Configuraciones básicas */
-        #define OPENSSL_CPUID_OBJ
-        #define OPENSSL_BN_ASM_MONT
-        #define OPENSSL_BN_ASM_GF2m
-        
-        #endif
-        EOF
-        
-        echo "=== Headers locales creados ==="
-        ls -la openssl-arm/include/openssl/
+        echo "=== ESTRUCTURA DEL PROYECTO ==="
+        find . -name "meson.build" -o -name "CMakeLists.txt" | head -20
+        echo ""
+        echo "=== ARCHIVOS FUENTE EN src/ ==="
+        find . -name "*.c" -o -name "*.cpp" | grep -i slipstream | head -20
 
-    # 5. Parchear archivos para quitar -Werror
-    - name: Parchear archivos para quitar -Werror
-      run: |
-        find . -path "*/picoquic/*" -name "CMakeLists.txt" | while read file; do
-          sed -i 's/-Werror//g; s/add_compile_options.*-Werror.*//g' "$file"
-        done
-
-    # 6. Configurar con Meson (usando headers locales)
+    # 5. Configurar con Meson (versión simplificada y robusta)
     - name: Configurar con Meson
       run: |
-        echo "=== Configurando con Meson ==="
+        echo "=== CONFIGURANDO MESON ==="
         
-        # Ruta ABSOLUTA a nuestros headers locales
-        LOCAL_SSL_PATH="$(pwd)/openssl-arm/include"
-        
-        cat > cross-arm.txt << EOF
+        # Archivo de cross-compilación simple y probado
+        cat > cross-arm.txt << 'EOF'
         [binaries]
         c = 'arm-linux-gnueabi-gcc'
         cpp = 'arm-linux-gnueabi-g++'
-        ar = 'arm-linux-gnueabi-ar'
         strip = 'arm-linux-gnueabi-strip'
         pkgconfig = 'pkg-config'
         
@@ -100,121 +66,157 @@ jobs:
         endian = 'little'
         
         [built-in options]
-        c_args = [
-          '-march=armv7-a',
-          '-I${LOCAL_SSL_PATH}',
-          '-I/usr/include',
-          '-I/usr/arm-linux-gnueabi/include',
-          '-DOPENSSL_NO_ASM',
-          '-DOPENSSL_API_COMPAT=0x10100000L'
-        ]
-        cpp_args = [
-          '-march=armv7-a',
-          '-I${LOCAL_SSL_PATH}',
-          '-I/usr/include',
-          '-I/usr/arm-linux-gnueabi/include',
-          '-DOPENSSL_NO_ASM'
-        ]
+        c_args = ['-march=armv7-a', '-DOPENSSL_NO_ASM']
+        cpp_args = ['-march=armv7-a', '-DOPENSSL_NO_ASM']
         EOF
         
-        echo "=== Archivo de cross-compilación ==="
-        cat cross-arm.txt
-        
-        echo "=== Configurando build ==="
-        meson setup build \
+        # Configurar SIN opciones complejas que puedan romper
+        meson setup build-arm32 \
           --cross-file cross-arm.txt \
-          -Dwarning_level=0 \
-          -Dwerror=false \
-          -Dbuildtype=plain \
-          -Dc_args="-DOPENSSL_NO_ASM -DOPENSSL_API_COMPAT=0x10100000L" \
-          -Doptimization=0
+          --buildtype=plain \
+          --default-library=static
 
-    # 7. Compilar proyecto (más tolerante)
-    - name: Compilar proyecto
+    # 6. DEBUG CRÍTICO: Ver EXACTAMENTE qué va a compilar Meson
+    - name: Ver targets de Meson
       run: |
-        echo "=== Compilando ==="
-        cd build && ninja -k 20 -j 2 || echo "Compilación completada con algunos errores"
-        
-        echo "=== Verificando si hay binarios ==="
-        find . -type f -executable 2>/dev/null | head -5
-
-    # 8. Buscar y copiar binarios (más inteligente)
-    - name: Buscar y copiar binarios
-      run: |
-        echo "=== BUSCANDO BINARIOS COMPILADOS ==="
-        
-        # Buscar en build/ y subdirectorios
-        echo "Buscando en build/:"
-        find build/ -type f \( -name "*slipstream*" -o -name "*client*" -o -name "*server*" -o -executable \) 2>/dev/null
-        
-        # Crear lista de posibles binarios
-        mapfile -t FILES < <(find build/ -type f -executable 2>/dev/null)
-        
-        if [ ${#FILES[@]} -eq 0 ]; then
-          echo "❌ No se encontraron ejecutables"
-          echo "=== Buscando cualquier archivo ==="
-          find build/ -type f -name "*.o" -o -name "*.a" -o -name "*.so" | head -10
-          exit 0  # No fallar, solo terminar
-        fi
+        echo "=== TARGETS DEFINIDOS POR MESON ==="
+        meson introspect --targets build-arm32/
         
         echo ""
-        echo "✅ Se encontraron ${#FILES[@]} ejecutables"
+        echo "=== INFORMACIÓN DEL PROYECTO ==="
+        meson introspect --projectinfo build-arm32/ 2>/dev/null || true
         
-        # Copiar hasta 2 primeros como cliente/servidor
-        for i in "${!FILES[@]}"; do
-          if [ $i -eq 0 ]; then
-            cp "${FILES[$i]}" slipstream-client
-            chmod +x slipstream-client
-            echo "📦 slipstream-client: ${FILES[$i]}"
-            file slipstream-client
-          elif [ $i -eq 1 ]; then
-            cp "${FILES[$i]}" slipstream-server
-            chmod +x slipstream-server
-            echo "📦 slipstream-server: ${FILES[$i]}"
-            file slipstream-server
-          fi
-        done
+        echo ""
+        echo "=== OPCIONES CONFIGURADAS ==="
+        meson configure build-arm32/
 
-    # 9. Subir binarios al repositorio
+    # 7. Compilar
+    - name: Compilar proyecto
+      run: |
+        echo "=== COMPILANDO ==="
+        cd build-arm32 && ninja -v 2>&1 | tail -50 || echo "Compilación terminada"
+
+    # 8. PASO CLAVE: Encontrar los binarios REALES
+    - name: Encontrar binarios generados
+      run: |
+        echo "=== BUSQUEDA EXHAUSTIVA DE BINARIOS ==="
+        
+        # 1. Buscar TODOS los archivos en build-arm32
+        echo "=== TODOS LOS ARCHIVOS EN build-arm32/ ==="
+        find build-arm32/ -type f 2>/dev/null | sort
+        
+        # 2. Buscar específicamente ejecutables
+        echo ""
+        echo "=== EJECUTABLES (con file) ==="
+        find build-arm32/ -type f -executable 2>/dev/null | while read f; do
+          echo "Archivo: $f"
+          file "$f" || true
+          echo "---"
+        done
+        
+        # 3. Buscar por patrones de nombre
+        echo ""
+        echo "=== BUSCANDO POR NOMBRE ==="
+        for pattern in slipstream client server main app; do
+          echo "Patrón: $pattern"
+          find build-arm32/ -type f -iname "*${pattern}*" 2>/dev/null || true
+        done
+        
+        # 4. Listar directorios
+        echo ""
+        echo "=== ESTRUCTURA DE DIRECTORIOS ==="
+        find build-arm32/ -type d 2>/dev/null | sort
+
+    # 9. Copiar binarios (SI SE ENCUENTRAN)
+    - name: Copiar binarios a raíz
+      run: |
+        echo "=== INTENTANDO COPIAR BINARIOS ==="
+        
+        # Estrategia 1: Buscar el target principal de Meson
+        TARGETS=$(meson introspect --targets build-arm32/ 2>/dev/null | grep -A5 '"type": "executable"' | grep '"name":' | cut -d'"' -f4 || true)
+        
+        echo "Targets ejecutables encontrados por Meson: $TARGETS"
+        
+        # Estrategia 2: Buscar en las rutas comunes de Meson
+        COMMON_PATHS="src app bin out debug release subprojects"
+        
+        for target in $TARGETS; do
+          echo ""
+          echo "Buscando target: $target"
+          
+          for dir in $COMMON_PATHS; do
+            if [ -f "build-arm32/$dir/$target" ]; then
+              echo "✅ Encontrado en: build-arm32/$dir/$target"
+              
+              # Determinar si es cliente o servidor
+              if [[ "$target" == *"client"* ]] || [[ "$target" == "slipstream-client" ]]; then
+                cp "build-arm32/$dir/$target" slipstream-client
+                chmod +x slipstream-client
+                echo "  → Copiado como slipstream-client"
+              elif [[ "$target" == *"server"* ]] || [[ "$target" == "slipstream-server" ]]; then
+                cp "build-arm32/$dir/$target" slipstream-server
+                chmod +x slipstream-server
+                echo "  → Copiado como slipstream-server"
+              else
+                # Si no sabemos, copiar con nombre del target
+                cp "build-arm32/$dir/$target" "$target"
+                chmod +x "$target"
+                echo "  → Copiado como $target"
+              fi
+            fi
+          done
+        done
+        
+        # Estrategia 3: Si no encontramos, buscar cualquier ejecutable
+        if [ ! -f "slipstream-client" ] && [ ! -f "slipstream-server" ]; then
+          echo ""
+          echo "No se encontraron targets específicos, buscando cualquier ejecutable..."
+          
+          FIRST_EXE=$(find build-arm32/ -type f -executable 2>/dev/null | head -1)
+          if [ -n "$FIRST_EXE" ]; then
+            cp "$FIRST_EXE" slipstream-client
+            chmod +x slipstream-client
+            echo "✅ Copiado primer ejecutable como slipstream-client: $FIRST_EXE"
+          fi
+          
+          SECOND_EXE=$(find build-arm32/ -type f -executable 2>/dev/null | head -2 | tail -1)
+          if [ -n "$SECOND_EXE" ] && [ "$SECOND_EXE" != "$FIRST_EXE" ]; then
+            cp "$SECOND_EXE" slipstream-server
+            chmod +x slipstream-server
+            echo "✅ Copiado segundo ejecutable como slipstream-server: $SECOND_EXE"
+          fi
+        fi
+        
+        # Resultado final
+        echo ""
+        echo "=== RESULTADO FINAL ==="
+        if [ -f "slipstream-client" ] || [ -f "slipstream-server" ]; then
+          echo "✅ BINARIOS CREADOS:"
+          [ -f "slipstream-client" ] && echo "  slipstream-client ($(file -b slipstream-client))"
+          [ -f "slipstream-server" ] && echo "  slipstream-server ($(file -b slipstream-server))"
+        else
+          echo "❌ NO SE ENCONTRARON BINARIOS"
+          echo "Último recurso - listar build-arm32 completo:"
+          ls -la build-arm32/ 2>/dev/null || true
+        fi
+
+    # 10. Subir binarios
     - name: Subir binarios al repositorio
       if: success()
       run: |
-        # Solo si hay binarios
-        BINARIES_EXIST=false
-        [ -f "slipstream-client" ] && BINARIES_EXIST=true
-        [ -f "slipstream-server" ] && BINARIES_EXIST=true
-        
-        if [ "$BINARIES_EXIST" = false ]; then
-          echo "⚠️  No hay binarios para subir"
+        if [ ! -f "slipstream-client" ] && [ ! -f "slipstream-server" ]; then
+          echo "No hay binarios para subir"
           exit 0
         fi
         
-        echo "=== Subiendo binarios ==="
-        
-        # Configurar Git
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "GitHub Actions"
         
-        # Agregar binarios existentes
         [ -f "slipstream-client" ] && git add slipstream-client
         [ -f "slipstream-server" ] && git add slipstream-server
         
-        # Verificar cambios
-        if git diff --cached --quiet; then
-          echo "✅ No hay cambios en binarios"
-        else
-          git commit -m "🔧 Actualizar binarios ARM32 [ci skip]" || echo "Commit falló, continuando..."
-          git push || echo "Push falló, puede que ya estén actualizados"
-          echo "✅ Proceso completado"
+        if ! git diff --cached --quiet; then
+          git commit -m "🔄 Binarios ARM32 actualizados [ci skip]"
+          git push
+          echo "✅ Binarios subidos"
         fi
-
-    # 10. Subir como artifact
-    - name: Subir como artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: slipstream-arm32
-        path: |
-          slipstream-client
-          slipstream-server
-        retention-days: 90
-        if-no-files-found: warn

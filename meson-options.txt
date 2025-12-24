@@ -1,0 +1,4 @@
+warning_level=0
+werror=false
+buildtype=release
+default_library=static

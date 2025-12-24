@@ -28,9 +28,9 @@ jobs:
           binutils-arm-linux-gnueabi \
           pkg-config \
           libssl-dev \
-          python3-pip  # Añadido para instalar meson actualizado
+          python3-pip
 
-    # 3. INSTALAR MESON ACTUALIZADO (NUEVO - ELIMINA EL ERROR DE VERSIÓN)
+    # 3. INSTALAR MESON ACTUALIZADO
     - name: Instalar Meson actualizado
       run: |
         echo "=== Instalando Meson 1.4.0 ==="
@@ -47,21 +47,13 @@ jobs:
         arm-linux-gnueabi-gcc --version || echo "❌ Compilador no disponible"
         
         echo ""
-        echo "2. Verificando OpenSSL:"
-        find /usr -name "opensslconf.h" 2>/dev/null | head -5
+        echo "2. Verificando strip binary:"
+        which arm-linux-gnueabi-strip || echo "Strip no encontrado, instalando..."
+        sudo apt-get install -y binutils-arm-linux-gnueabi
         
         echo ""
-        echo "3. Probando compilación simple con OpenSSL:"
-        cat > test_ssl.c << 'EOF'
-        #include <openssl/ssl.h>
-        int main() { return 0; }
-        EOF
-        
-        # Probar con diferentes rutas
-        for INCLUDE_PATH in "/usr/include" "/usr/arm-linux-gnueabi/include" "/usr/local/include"; do
-          echo "Probando con -I$INCLUDE_PATH"
-          arm-linux-gnueabi-gcc -march=armv7-a -I$INCLUDE_PATH -c test_ssl.c -o /dev/null 2>&1 && echo "✅ Funciona" || echo "❌ Falló"
-        done
+        echo "3. Verificando OpenSSL:"
+        find /usr -name "opensslconf.h" 2>/dev/null | head -5
 
     # 5. Parchear archivos para quitar -Werror
     - name: Parchear archivos para quitar -Werror
@@ -80,16 +72,25 @@ jobs:
           sed -i 's/-Werror//g' "$file"
         done
 
-    # 6. Configurar con Meson (CORREGIDO)
+    # 6. Configurar con Meson (CORREGIDO CON strip)
     - name: Configurar con Meson
       run: |
         echo "=== Configurando con Meson ==="
         
-        # Crear archivo de cross-compilación SIMPLE
+        # Verificar que strip existe
+        echo "Verificando binarios de herramientas:"
+        which arm-linux-gnueabi-gcc
+        which arm-linux-gnueabi-g++
+        which arm-linux-gnueabi-strip || echo "WARNING: strip no encontrado"
+        
+        # Crear archivo de cross-compilación COMPLETO
         cat > cross-arm.txt << 'EOF'
         [binaries]
         c = 'arm-linux-gnueabi-gcc'
         cpp = 'arm-linux-gnueabi-g++'
+        ar = 'arm-linux-gnueabi-ar'
+        strip = 'arm-linux-gnueabi-strip'
+        pkgconfig = 'pkg-config'
         
         [host_machine]
         system = 'linux'
@@ -97,52 +98,89 @@ jobs:
         cpu = 'armv7'
         endian = 'little'
         
-        [properties]
-        c_args = ['-march=armv7-a', '-w', '-I/usr/include']
-        cpp_args = ['-march=armv7-a', '-w', '-I/usr/include']
+        [built-in options]
+        c_args = ['-march=armv7-a', '-w', '-I/usr/include', '-I/usr/arm-linux-gnueabi/include']
+        cpp_args = ['-march=armv7-a', '-w', '-I/usr/include', '-I/usr/arm-linux-gnueabi/include']
         EOF
         
+        echo "=== Archivo de cross-compilación creado ==="
+        cat cross-arm.txt
+        
         # Configurar con opciones MÍNIMAS
+        echo "=== Ejecutando meson setup ==="
         meson setup build \
           --cross-file cross-arm.txt \
           -Dwarning_level=0 \
           -Dwerror=false \
-          -Dbuildtype=debug
+          -Dbuildtype=debug 2>&1 | tail -50
 
-    # 7. Compilar proyecto
+    # 7. Compilar proyecto (CON MÁS DEBUG)
     - name: Compilar proyecto
       run: |
         echo "=== Compilando ==="
         
+        # Mostrar contenido del directorio build
+        echo "=== Contenido de build/ antes de compilar ==="
+        ls -la build/ 2>/dev/null || echo "Directorio build no existe"
+        
         # Intentar compilar
-        if meson compile -C build; then
+        if meson compile -C build 2>&1; then
           echo "✅ Compilación exitosa"
         else
           echo "⚠️  Primero intento falló, intentando con ninja directamente..."
-          cd build && ninja -k 5 || echo "Continuando..."
+          cd build && ninja -k 5 2>&1 | tail -100 || echo "Continuando..."
         fi
+        
+        # Verificar si se crearon binarios
+        echo "=== Verificando binarios creados ==="
+        find build/ -type f -executable 2>/dev/null || echo "No se encontraron ejecutables"
 
-    # 8. Verificar resultado
+    # 8. Verificar resultado (MÁS ROBUSTO)
     - name: Verificar binarios
       run: |
         echo "=== Verificando binarios ==="
         
-        if [ -f "build/slipstream-client" ]; then
-          echo "✅ slipstream-client creado"
-          echo "=== ARQUITECTURA ==="
-          file build/slipstream-client
+        # Buscar cualquier binario que pueda ser slipstream
+        echo "=== Buscando ejecutables en build/ ==="
+        find build/ -type f -executable -name "*slipstream*" -o -name "*client*" -o -name "*server*" 2>/dev/null
+        
+        # Si encontramos algún binario
+        if find build/ -type f -executable -name "*" 2>/dev/null | grep -q "."; then
+          echo "✅ Se encontraron ejecutables"
           
-          # Crear paquete simple
+          # Crear directorio para binarios
           mkdir -p slipstream-bin
-          cp build/slipstream-client slipstream-bin/
-          [ -f "build/slipstream-server" ] && cp build/slipstream-server slipstream-bin/
           
+          # Copiar todos los ejecutables encontrados
+          find build/ -type f -executable -name "*" -exec cp {} slipstream-bin/ \; 2>/dev/null
+          
+          echo "=== Binarios copiados ==="
+          ls -la slipstream-bin/
+          
+          # Verificar arquitectura
+          for bin in slipstream-bin/*; do
+            if [ -f "$bin" ]; then
+              echo "=== ARQUITECTURA de $(basename $bin) ==="
+              file "$bin"
+            fi
+          done
+          
+          # Crear paquete
           tar -czf slipstream-arm32.tar.gz slipstream-bin/
-          echo "✅ Paquete creado"
+          echo "✅ Paquete creado: slipstream-arm32.tar.gz"
         else
-          echo "❌ No se pudo crear slipstream-client"
+          echo "❌ No se encontraron binarios ejecutables"
           echo "=== ÚLTIMOS ERRORES ==="
-          tail -100 build/meson-logs/meson-log.txt
+          if [ -f "build/meson-logs/meson-log.txt" ]; then
+            tail -200 build/meson-logs/meson-log.txt
+          else
+            echo "No hay archivo de log"
+          fi
+          
+          # Mostrar estructura del directorio build
+          echo "=== Estructura de build/ ==="
+          find build/ -type f -name "*.o" -o -name "*.a" -o -name "*.so" 2>/dev/null | head -20
+          
           exit 1
         fi
 

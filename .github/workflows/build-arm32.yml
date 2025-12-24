@@ -66,7 +66,7 @@ jobs:
         cpp_args = ['-march=armv7-a', '-w', '-I/usr/include', '-I/usr/arm-linux-gnueabi/include']
         EOF
         
-        meson setup build \
+        meson setup meson-build \
           --cross-file cross-arm.txt \
           -Dwarning_level=0 \
           -Dwerror=false \
@@ -75,24 +75,24 @@ jobs:
     # 6. Compilar proyecto
     - name: Compilar proyecto
       run: |
-        meson compile -C build
+        meson compile -C meson-build
 
-    # 7. ENCONTRAR Y RENOMBRAR BINARIOS (PASO CLAVE)
-    - name: Buscar y preparar binarios
+    # 7. Buscar y mover binarios a build/arm32/
+    - name: Buscar y organizar binarios
       run: |
-        echo "=== BUSCANDO BINARIOS EN build/ ==="
+        echo "=== BUSCANDO BINARIOS EN meson-build/ ==="
+        
+        # Crear directorio para binarios finales
+        mkdir -p build/arm32
         
         # Mostrar estructura para debug
-        echo "Estructura de build/:"
-        find build/ -type f -executable 2>/dev/null
+        echo "Estructura de meson-build/:"
+        find meson-build/ -type f -executable 2>/dev/null || echo "No hay ejecutables"
         
-        # Buscar binarios (probables nombres)
+        # Buscar binarios del cliente
         CLIENT_FOUND=""
-        SERVER_FOUND=""
-        
-        # Posibles nombres del cliente
-        for name in "slipstream-client" "client" "slipstream" "main" "app"; do
-          for file in $(find build/ -type f -executable -name "*${name}*" 2>/dev/null); do
+        for pattern in "*slipstream-client*" "*client*" "*slipstream*" "*main*" "*app*"; do
+          for file in $(find meson-build/ -type f -executable -name "$pattern" 2>/dev/null); do
             if [ -z "$CLIENT_FOUND" ]; then
               CLIENT_FOUND="$file"
               echo "✅ Cliente encontrado: $file"
@@ -100,9 +100,10 @@ jobs:
           done
         done
         
-        # Posibles nombres del servidor
-        for name in "slipstream-server" "server"; do
-          for file in $(find build/ -type f -executable -name "*${name}*" 2>/dev/null); do
+        # Buscar binarios del servidor
+        SERVER_FOUND=""
+        for pattern in "*slipstream-server*" "*server*"; do
+          for file in $(find meson-build/ -type f -executable -name "$pattern" 2>/dev/null); do
             if [ -z "$SERVER_FOUND" ]; then
               SERVER_FOUND="$file"
               echo "✅ Servidor encontrado: $file"
@@ -110,61 +111,102 @@ jobs:
           done
         done
         
-        # Si no encontramos, tomar el primer ejecutable como cliente
-        if [ -z "$CLIENT_FOUND" ] && [ -n "$(find build/ -type f -executable 2>/dev/null | head -1)" ]; then
-          CLIENT_FOUND=$(find build/ -type f -executable 2>/dev/null | head -1)
+        # Si no encontramos específicos, buscar cualquier ejecutable
+        if [ -z "$CLIENT_FOUND" ] && [ -n "$(find meson-build/ -type f -executable 2>/dev/null | head -1)" ]; then
+          CLIENT_FOUND=$(find meson-build/ -type f -executable 2>/dev/null | head -1)
           echo "⚠️  Usando primer ejecutable como cliente: $CLIENT_FOUND"
         fi
         
-        # Copiar y renombrar a nombres estándar
+        # Mover binarios a build/arm32/ con nombres estándar
         if [ -n "$CLIENT_FOUND" ]; then
-          cp "$CLIENT_FOUND" slipstream-client
-          echo "✅ slipstream-client creado"
-          file slipstream-client
+          cp "$CLIENT_FOUND" build/arm32/slipstream-client
+          echo "✅ slipstream-client copiado a build/arm32/"
+          echo "=== VERIFICACIÓN ==="
+          file build/arm32/slipstream-client
+          chmod +x build/arm32/slipstream-client
         else
           echo "❌ No se encontró ningún binario para el cliente"
+          find meson-build/ -type f | head -20
           exit 1
         fi
         
         if [ -n "$SERVER_FOUND" ]; then
-          cp "$SERVER_FOUND" slipstream-server
-          echo "✅ slipstream-server creado"
-          file slipstream-server
-        else
-          echo "⚠️  No se encontró binario para el servidor, solo cliente"
+          cp "$SERVER_FOUND" build/arm32/slipstream-server
+          echo "✅ slipstream-server copiado a build/arm32/"
+          file build/arm32/slipstream-server
+          chmod +x build/arm32/slipstream-server
         fi
+        
+        # Crear README
+        cat > build/arm32/README.md << 'EOF'
+        # Binarios Slipstream para ARM32
+        
+        ## Archivos:
+        EOF
+        
+        for bin in build/arm32/*; do
+          if [ -f "$bin" ] && [ "$(basename "$bin")" != "README.md" ]; then
+            echo "- **$(basename "$bin")**: $(file "$bin" | cut -d: -f2-)" >> build/arm32/README.md
+          fi
+        done
+        
+        cat >> build/arm32/README.md << 'EOF'
+        
+        ## Cómo usar:
+        1. Copia los binarios a tu dispositivo ARM (Raspberry Pi, etc.)
+        2. Hazlos ejecutables: `chmod +x slipstream-*`
+        3. Ejecuta: `./slipstream-client` o `./slipstream-server`
+        
+        ## Compilado automáticamente por GitHub Actions
+        Fecha: $(date)
+        Commit: ${{ github.sha }}
+        EOF
+        
+        echo "=== BINARIOS LISTOS EN build/arm32/ ==="
+        ls -la build/arm32/
 
-    # 8. Subir binarios al repositorio (REEMPLAZANDO LOS EXISTENTES)
+    # 8. Subir binarios al repositorio
     - name: Subir binarios al repositorio
       run: |
         # Configurar Git
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "GitHub Actions"
         
-        # Agregar los binarios
-        git add slipstream-client slipstream-server
+        # Agregar carpeta build/arm32/
+        git add build/
         
         # Verificar cambios
         if git diff --cached --quiet; then
           echo "No hay cambios en los binarios"
         else
           # Hacer commit
-          git commit -m "🔄 Actualizar binarios ARM32 compilados [ci skip]"
+          git commit -m "📦 Actualizar binarios ARM32 en build/arm32/ [ci skip]"
           
           # Hacer push
           git push
-          echo "✅ Binarios subidos al repositorio"
+          echo "✅ Binarios subidos a build/arm32/"
         fi
 
-    # 9. (Opcional) Crear release
-    - name: Crear Release con binarios
+    # 9. Crear artifact para descarga
+    - name: Crear artifact descargable
+      uses: actions/upload-artifact@v4
+      with:
+        name: slipstream-arm32
+        path: |
+          build/arm32/
+        retention-days: 90
+
+    # 10. (Opcional) Crear release
+    - name: Crear Release
       if: success() && github.ref == 'refs/heads/main'
       uses: softprops/action-gh-release@v1
       with:
         name: "Slipstream ARM32 v${{ github.run_number }}"
         tag_name: "arm32-v${{ github.run_number }}"
         files: |
-          slipstream-client
-          slipstream-server
+          build/arm32/slipstream-client
+          build/arm32/slipstream-server
+          build/arm32/README.md
         draft: false
         prerelease: false
+        generate_release_notes: true

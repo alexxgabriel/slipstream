@@ -3,63 +3,69 @@ name: Build slipstream for ARM 32-bit
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:  # Permite ejecutar manualmente
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Usa la versión más reciente
     
     steps:
-    - name: Checkout repository
+    # 1. Obtener código y submódulos
+    - name: Checkout repository with submodules
       uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
-    # PASO CRÍTICO: Instalar OpenSSL para ARM
-    - name: Install ARM cross-compiler and OpenSSL
+    # 2. INSTALACIÓN COMPLETA PARA ARM
+    - name: Install ARM cross-compilation toolchain
       run: |
         sudo apt-get update
-        # 1. Instalar el compilador cruzado
+        # Instalar TODO el entorno de compilación ARM
         sudo apt-get install -y \
-          meson ninja-build cmake \
+          meson \
+          ninja-build \
+          cmake \
           gcc-arm-linux-gnueabi \
-          g++-arm-linux-gnueabi
-        
-        # 2. Instalar OpenSSL para ARM (ESTO FALTA EN TU CONFIG)
-        sudo apt-get install -y \
+          g++-arm-linux-gnueabi \
+          binutils-arm-linux-gnueabi \
+          libc6-dev-armhf-cross \
           libssl-dev:armhf \
-          libssl-dev
+          libssl-dev \
+          pkg-config \
+          crossbuild-essential-armhf
         
-        # 3. Configurar rutas para pkg-config
-        echo "PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabi/pkgconfig" >> $GITHUB_ENV
-        echo "PKG_CONFIG_SYSROOT_DIR=/" >> $GITHUB_ENV
+        # Configurar enlaces para OpenSSL (CRÍTICO)
+        sudo mkdir -p /usr/arm-linux-gnueabi/include
+        sudo ln -sf /usr/include/openssl /usr/arm-linux-gnueabi/include/openssl 2>/dev/null || true
 
-    - name: Patch to remove -Werror
+    # 3. Parchear para eliminar -Werror de forma AGRESIVA
+    - name: Patch build files to remove -Werror
       run: |
-        find . -type f \( -name "CMakeLists.txt" -o -name "*.cmake" \) -exec sed -i 's/-Werror//g' {} \;
+        # Buscar y eliminar -Werror en TODOS los archivos
+        find . -type f \( -name "CMakeLists.txt" -o -name "*.cmake" -o -name "*.mk" \) -exec sed -i 's/-Werror//g; s/Werror//g; s/add_compile_options.*Werror.*//g' {} \;
+        
+        # Parche específico para picotls
+        if [ -f "CMakeLists.txt" ]; then
+          echo 'add_compile_options(-w)' >> CMakeLists.txt
+        fi
 
-    # PASO CRÍTICO: Verificar que OpenSSL existe para ARM
-    - name: Verify OpenSSL for ARM
-      run: |
-        echo "Buscando opensslconf.h para ARM..."
-        find /usr -name "opensslconf.h" 2>/dev/null | head -5
-        echo ""
-        echo "Probando compilación con OpenSSL..."
-        arm-linux-gnueabi-gcc -march=armv7-a -x c -c - <<<'#include <openssl/ssl.h>' -o /dev/null && echo "✅ OpenSSL funciona" || echo "❌ OpenSSL falla"
-
+    # 4. Configurar el proyecto con Meson
     - name: Configure with Meson
       env:
         CC: arm-linux-gnueabi-gcc
         CXX: arm-linux-gnueabi-g++
-        CFLAGS: "-march=armv7-a -w"
-        CXXFLAGS: "-march=armv7-a -w"
+        CFLAGS: "-march=armv7-a -w -O2"
+        CXXFLAGS: "-march=armv7-a -w -O2"
+        PKG_CONFIG_PATH: "/usr/lib/arm-linux-gnueabi/pkgconfig:/usr/share/pkgconfig"
+        PKG_CONFIG_SYSROOT_DIR: "/usr/arm-linux-gnueabi"
       run: |
-        # Crear archivo de cross-compilación DINÁMICO
+        # Crear archivo de cross-compilación dinámico
         cat > cross-arm.txt << 'EOF'
         [binaries]
         c = 'arm-linux-gnueabi-gcc'
         cpp = 'arm-linux-gnueabi-g++'
         ar = 'arm-linux-gnueabi-ar'
+        strip = 'arm-linux-gnueabi-strip'
         pkgconfig = 'pkg-config'
         
         [host_machine]
@@ -69,39 +75,86 @@ jobs:
         endian = 'little'
         
         [properties]
+        c_args = ['-march=armv7-a', '-w']
+        cpp_args = ['-march=armv7-a', '-w']
         pkg_config_path = '/usr/lib/arm-linux-gnueabi/pkgconfig'
         EOF
         
+        # Configurar el build
         meson setup build \
           --cross-file cross-arm.txt \
+          --buildtype release \
           -Dwarning_level=0 \
           -Dwerror=false \
-          -Dbuildtype=debug
+          -Ddefault_library=static
 
-    - name: Compile with Ninja
+    # 5. Compilar con tolerancia a errores
+    - name: Compile project
       run: |
-        # Compilar ignorando algunos errores
-        meson compile -C build -j2 || true
-        # Intentar continuar a pesar de errores
-        cd build && ninja -k 5
+        # Intentar compilar normalmente primero
+        meson compile -C build -j 2 || echo "Continuing despite errors..."
+        
+        # Si falla, intentar con ninja directamente ignorando errores
+        cd build && ninja -k 10 || true
 
-    - name: Check for successful build
+    # 6. Verificar y preparar binarios
+    - name: Prepare binaries for download
       run: |
-        if [ -f "build/slipstream-client" ]; then
-          echo "✅ Binario creado exitosamente"
+        # Verificar que los binarios existen
+        if [ -f "build/slipstream-client" ] && [ -f "build/slipstream-server" ]; then
+          echo "✅ Binarios creados exitosamente!"
+          
+          # Verificar arquitectura
+          echo "=== Verificación de Arquitectura ==="
           file build/slipstream-client
+          file build/slipstream-server
+          
+          # Crear paquete limpio
+          mkdir -p slipstream-arm32
+          cp build/slipstream-client slipstream-arm32/
+          cp build/slipstream-server slipstream-arm32/
+          
+          # Añadir script de instalación para Termux
+          cat > slipstream-arm32/install-termux.sh << 'EOF'
+          #!/data/data/com.termux/files/usr/bin/bash
+          echo "Instalando slipstream en Termux..."
+          chmod +x slipstream-client slipstream-server
+          echo "✅ Listo! Ejecuta: ./slipstream-client"
+          EOF
+          chmod +x slipstream-arm32/install-termux.sh
+          
+          # Crear README
+          cat > slipstream-arm32/README.txt << 'EOF'
+          Slipstream compilado para ARM 32-bit (armv7)
+          --------------------------------------------
+          Archivos:
+          - slipstream-client: Cliente DNS tunnel
+          - slipstream-server: Servidor
+          - install-termux.sh: Script de instalación
+          
+          Para usar en Termux:
+          1. chmod +x slipstream-client
+          2. ./slipstream-client --help
+          
+          Compilado: $(date)
+          EOF
+          
+          # Comprimir
+          tar -czf slipstream-arm32.tar.gz slipstream-arm32/
+          echo "slipstream-arm32.tar.gz creado"
         else
-          echo "❌ Compilación falló, mostrando errores:"
-          tail -100 build/meson-logs/meson-log.txt
+          echo "❌ Binarios no encontrados. Mostrando logs..."
+          tail -200 build/meson-logs/meson-log.txt
           exit 1
         fi
 
+    # 7. Subir binarios como artefacto
     - name: Upload binaries
-      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: slipstream-arm32-binaries
+        name: slipstream-arm32-package
         path: |
+          slipstream-arm32.tar.gz
           build/slipstream-client
           build/slipstream-server
         retention-days: 90

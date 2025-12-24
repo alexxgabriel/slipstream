@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # Cambiamos a 22.04 que tiene mejor soporte
+    runs-on: ubuntu-22.04
     
     steps:
     # 1. Obtener código y submódulos
@@ -16,13 +16,10 @@ jobs:
       with:
         submodules: 'recursive'
 
-    # 2. INSTALACIÓN CORREGIDA - SIN libssl-dev:armhf
+    # 2. INSTALACIÓN CORREGIDA
     - name: Instalar herramientas para compilar en ARM
       run: |
         sudo apt-get update
-        
-        # SOLUCIÓN: Instalar OpenSSL de forma diferente
-        # Primero las herramientas básicas
         sudo apt-get install -y \
           meson \
           ninja-build \
@@ -31,78 +28,55 @@ jobs:
           g++-arm-linux-gnueabi \
           binutils-arm-linux-gnueabi \
           pkg-config \
-          libssl-dev \
-          ca-certificates
-        
-        # SOLUCIÓN CRÍTICA: Descargar OpenSSL para ARM manualmente
-        echo "=== Configurando OpenSSL para ARM ==="
-        
-        # Crear directorios necesarios
-        sudo mkdir -p /usr/arm-linux-gnueabi/include
-        sudo mkdir -p /usr/arm-linux-gnueabi/lib
-        
-        # Copiar headers de OpenSSL desde la versión x86_64 (funciona para cross-compile)
-        sudo cp -r /usr/include/openssl /usr/arm-linux-gnueabi/include/ || true
-        
-        # Crear archivo opensslconf.h básico si no existe
-        if [ ! -f "/usr/arm-linux-gnueabi/include/openssl/opensslconf.h" ]; then
-          sudo cat > /usr/arm-linux-gnueabi/include/openssl/opensslconf.h << 'EOF'
-          /* opensslconf.h básico para ARM */
-          #ifndef OPENSSL_OPENSSLCONF_H
-          #define OPENSSL_OPENSSLCONF_H
-          
-          #define OPENSSL_THREADS
-          #define OPENSSL_NO_ASM
-          #define OPENSSL_NO_ENGINE
-          #define OPENSSL_NO_HW
-          #define OPENSSL_NO_DEPRECATED
-          #define OPENSSL_NO_STATIC_ENGINE
-          
-          #endif
-          EOF
-        fi
-        
-        # Configurar pkg-config para ARM
-        sudo mkdir -p /usr/lib/arm-linux-gnueabi/pkgconfig
-        if [ ! -f "/usr/lib/arm-linux-gnueabi/pkgconfig/openssl.pc" ]; then
-          sudo cat > /usr/lib/arm-linux-gnueabi/pkgconfig/openssl.pc << 'EOF'
-          Name: OpenSSL
-          Description: Secure Sockets Layer and cryptography libraries
-          Version: 1.1.1
-          Requires: 
-          Libs: -lssl -lcrypto
-          Cflags: -I/usr/arm-linux-gnueabi/include
-          EOF
-        fi
-        
-        echo "OpenSSL configurado para ARM"
+          libssl-dev
 
-    # 3. Parchear para eliminar -Werror
+    # 3. DEBUG DEL ENTORNO (NUEVO)
+    - name: Debug del entorno
+      run: |
+        echo "=== VERIFICACIÓN DEL ENTORNO ==="
+        echo "1. Verificando compilador ARM:"
+        arm-linux-gnueabi-gcc --version || echo "❌ Compilador no disponible"
+        
+        echo ""
+        echo "2. Verificando OpenSSL:"
+        find /usr -name "opensslconf.h" 2>/dev/null | head -5
+        
+        echo ""
+        echo "3. Probando compilación simple con OpenSSL:"
+        cat > test_ssl.c << 'EOF'
+        #include <openssl/ssl.h>
+        int main() { return 0; }
+        EOF
+        
+        # Probar con diferentes rutas
+        for INCLUDE_PATH in "/usr/include" "/usr/arm-linux-gnueabi/include" "/usr/local/include"; do
+          echo "Probando con -I$INCLUDE_PATH"
+          arm-linux-gnueabi-gcc -march=armv7-a -I$INCLUDE_PATH -c test_ssl.c -o /dev/null 2>&1 && echo "✅ Funciona" || echo "❌ Falló"
+        done
+
+    # 4. Parchear archivos para quitar -Werror
     - name: Parchear archivos para quitar -Werror
       run: |
         echo "=== Parcheando archivos ==="
         
-        # Método más agresivo
-        find . -type f -name "CMakeLists.txt" | while read file; do
+        # Método DIRECTO: Buscar archivos específicos de picoquic
+        find . -path "*/picoquic/*" -name "CMakeLists.txt" | while read file; do
           echo "Parcheando: $file"
-          sed -i 's/-Werror//g; s/add_compile_options.*Werror.*//g; s/set(CMAKE_C_FLAGS.*Werror.*)/# Werror removido/g' "$file"
+          sed -i 's/-Werror//g; s/add_compile_options.*-Werror.*//g' "$file"
         done
         
-        # Añadir -w para desactivar todos los warnings
-        echo 'add_compile_options(-w)' >> CMakeLists.txt 2>/dev/null || echo "No se pudo modificar CMakeLists.txt"
+        # Parchear también archivos .cmake
+        find . -path "*/picoquic/*" -name "*.cmake" | while read file; do
+          echo "Parcheando: $file"
+          sed -i 's/-Werror//g' "$file"
+        done
 
-    # 4. Configurar con Meson (SIMPLIFICADO)
+    # 5. Configurar con Meson (CORREGIDO)
     - name: Configurar con Meson
-      env:
-        CC: arm-linux-gnueabi-gcc
-        CXX: arm-linux-gnueabi-g++
-        CFLAGS: "-march=armv7-a -w -O2"
-        CXXFLAGS: "-march=armv7-a -w -O2"
-        PKG_CONFIG_PATH: "/usr/lib/arm-linux-gnueabi/pkgconfig"
       run: |
         echo "=== Configurando con Meson ==="
         
-        # Crear archivo de cross-compilación SIMPLIFICADO
+        # Crear archivo de cross-compilación SIMPLE
         cat > cross-arm.txt << 'EOF'
         [binaries]
         c = 'arm-linux-gnueabi-gcc'
@@ -115,79 +89,59 @@ jobs:
         endian = 'little'
         
         [properties]
-        c_args = ['-march=armv7-a', '-w', '-I/usr/arm-linux-gnueabi/include']
-        cpp_args = ['-march=armv7-a', '-w', '-I/usr/arm-linux-gnueabi/include']
-        pkg_config_path = '/usr/lib/arm-linux-gnueabi/pkgconfig'
+        c_args = ['-march=armv7-a', '-w', '-I/usr/include']
+        cpp_args = ['-march=armv7-a', '-w', '-I/usr/include']
         EOF
         
-        # Configurar con opciones MUY permisivas
+        # Configurar con opciones MÍNIMAS
         meson setup build \
           --cross-file cross-arm.txt \
           -Dwarning_level=0 \
           -Dwerror=false \
-          -Dbuildtype=debug \
-          -Ddefault_library=static \
-          -Dc_args="-march=armv7-a -w -I/usr/arm-linux-gnueabi/include" \
-          -Dcpp_args="-march=armv7-a -w -I/usr/arm-linux-gnueabi/include"
-        
-        echo "✅ Configuración completada"
+          -Dbuildtype=debug
 
-    # 5. Compilar con método de fuerza bruta
+    # 6. Compilar proyecto
     - name: Compilar proyecto
       run: |
         echo "=== Compilando ==="
         
-        # Intentar varias veces si falla
-        for i in 1 2 3; do
-          echo "Intento $i de 3..."
-          if meson compile -C build -j 2; then
-            echo "✅ Compilación exitosa en intento $i"
-            break
-          else
-            echo "⚠️  Intento $i falló, continuando..."
-            # Parchear archivos de error específicos
-            find build -name "*.o" -size 0 -delete 2>/dev/null || true
-          fi
-        done
-        
-        # Si aún falla, intentar con ninja directamente
-        if [ ! -f "build/slipstream-client" ]; then
-          echo "⚙️  Usando ninja directamente..."
-          cd build && ninja -k 20 || true
+        # Intentar compilar
+        if meson compile -C build; then
+          echo "✅ Compilación exitosa"
+        else
+          echo "⚠️  Primero intento falló, intentando con ninja directamente..."
+          cd build && ninja -k 5 || echo "Continuando..."
         fi
 
-    # 6. Verificar resultado
-    - name: Verificar y preparar binarios
+    # 7. Verificar resultado
+    - name: Verificar binarios
       run: |
         echo "=== Verificando binarios ==="
         
         if [ -f "build/slipstream-client" ]; then
           echo "✅ slipstream-client creado"
+          echo "=== ARQUITECTURA ==="
           file build/slipstream-client
           
-          # Crear paquete mínimo
+          # Crear paquete simple
           mkdir -p slipstream-bin
           cp build/slipstream-client slipstream-bin/
-          if [ -f "build/slipstream-server" ]; then
-            cp build/slipstream-server slipstream-bin/
-          fi
+          [ -f "build/slipstream-server" ] && cp build/slipstream-server slipstream-bin/
           
-          # Comprimir
           tar -czf slipstream-arm32.tar.gz slipstream-bin/
-          echo "✅ Paquete creado: slipstream-arm32.tar.gz"
+          echo "✅ Paquete creado"
         else
           echo "❌ No se pudo crear slipstream-client"
-          echo "=== Últimos logs ==="
-          tail -50 build/meson-logs/meson-log.txt
+          echo "=== ÚLTIMOS ERRORES ==="
+          tail -100 build/meson-logs/meson-log.txt
           exit 1
         fi
 
-    # 7. Subir binarios
+    # 8. Subir binarios
     - name: Subir binarios
       uses: actions/upload-artifact@v4
       with:
         name: slipstream-arm32
         path: |
           slipstream-arm32.tar.gz
-          build/slipstream-client
         retention-days: 90

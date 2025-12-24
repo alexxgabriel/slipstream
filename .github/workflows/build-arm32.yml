@@ -17,95 +17,190 @@ jobs:
         submodules: 'recursive'
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 2. Instalar herramientas NATIVAS para ARM (NO cross-compile)
-    - name: Instalar compilador nativo ARM
+    # 2. Instalar herramientas (SIN libssl-dev:armhf)
+    - name: Instalar herramientas básicas
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           ninja-build \
-          meson \
+          cmake \
           gcc-arm-linux-gnueabi \
           g++-arm-linux-gnueabi \
           binutils-arm-linux-gnueabi \
-          libssl-dev:armhf
+          pkg-config \
+          python3-pip \
+          libssl-dev  # Solo OpenSSL normal
 
-    # 3. Compilar NATIVAMENTE para ARM
-    - name: Compilar nativamente para ARM
+    # 3. Instalar Meson
+    - name: Instalar Meson
       run: |
-        echo "=== Configurando build NATIVO para ARM ==="
+        pip3 install --upgrade pip
+        pip3 install meson==1.4.0
+
+    # 4. WORKAROUND: Preparar entorno OpenSSL manualmente
+    - name: Preparar OpenSSL para ARM
+      run: |
+        echo "=== Preparando entorno OpenSSL ==="
         
-        # Configurar con Meson para ARM
-        CC=arm-linux-gnueabi-gcc CXX=arm-linux-gnueabi-g++ meson setup build-arm \
+        # Crear directorios necesarios
+        sudo mkdir -p /usr/arm-linux-gnueabi/include/openssl
+        
+        # Copiar headers de OpenSSL del sistema
+        sudo cp -r /usr/include/openssl/* /usr/arm-linux-gnueabi/include/openssl/ 2>/dev/null || true
+        
+        # Crear archivo opensslconf.h básico
+        echo "Creando opensslconf.h para ARM..."
+        cat << 'EOF' | sudo tee /usr/arm-linux-gnueabi/include/openssl/opensslconf.h > /dev/null
+#ifndef OPENSSL_CONF_H
+#define OPENSSL_CONF_H
+
+#define OPENSSL_NO_ASM
+#define OPENSSL_NO_INLINE_ASM
+#define OPENSSL_THREADS
+#define OPENSSL_API_COMPAT 0x10100000L
+
+/* Deshabilitar optimizaciones específicas de CPU */
+#define OPENSSL_CPUID_OBJ
+#define OPENSSL_BN_ASM_MONT
+#define OPENSSL_BN_ASM_GF2m
+
+#endif
+EOF
+        
+        echo "✅ Entorno OpenSSL preparado"
+
+    # 5. Configurar y compilar
+    - name: Compilar proyecto
+      run: |
+        echo "=== CONFIGURANDO Y COMPILANDO ==="
+        
+        # Configurar con variables de entorno
+        export CC=arm-linux-gnueabi-gcc
+        export CXX=arm-linux-gnueabi-g++
+        export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabi/pkgconfig:/usr/lib/pkgconfig
+        export CFLAGS="-march=armv7-a -I/usr/arm-linux-gnueabi/include -DOPENSSL_NO_ASM"
+        export CXXFLAGS="-march=armv7-a -I/usr/arm-linux-gnueabi/include -DOPENSSL_NO_ASM"
+        
+        # Configurar Meson con opciones mínimas
+        meson setup build-arm \
+          --buildtype=release \
           -Dwarning_level=0 \
           -Dwerror=false \
-          -Dbuildtype=release \
-          -Dc_args="-march=armv7-a -DOPENSSL_NO_ASM" \
-          -Dcpp_args="-march=armv7-a"
+          -Ddefault_library=static
         
-        echo "=== Compilando ==="
-        meson compile -C build-arm
+        echo "=== COMPILANDO ==="
+        meson compile -C build-arm -v
         
-        echo "=== Buscando binarios ==="
-        find build-arm/ -type f -executable -name "*slipstream*" || find build-arm/ -type f -executable
+        echo "=== VERIFICANDO RESULTADOS ==="
+        find build-arm/ -type f -executable 2>/dev/null | head -10
 
-    # 4. Copiar binarios encontrados
-    - name: Copiar binarios a raíz
+    # 6. Buscar y copiar binarios (MÉTODO DIRECTO)
+    - name: Encontrar y copiar binarios
       run: |
-        echo "=== Copiando binarios ==="
+        echo "=== BUSCANDO BINARIOS ==="
         
-        # Buscar cliente
-        if find build-arm/ -type f -executable -name "*client*" | grep -q .; then
-          CLIENT=$(find build-arm/ -type f -executable -name "*client*" | head -1)
-          cp "$CLIENT" slipstream-client
+        # Mostrar estructura completa
+        echo "Estructura de build-arm/:"
+        find build-arm/ -type f 2>/dev/null | head -30
+        
+        # Buscar archivos por nombre (patrones comunes)
+        CLIENT_FOUND=""
+        SERVER_FOUND=""
+        
+        # Patrones para buscar
+        for dir in "." "src" "bin" "app"; do
+          if [ -f "build-arm/$dir/slipstream-client" ]; then
+            CLIENT_FOUND="build-arm/$dir/slipstream-client"
+          fi
+          if [ -f "build-arm/$dir/slipstream-server" ]; then
+            SERVER_FOUND="build-arm/$dir/slipstream-server"
+          fi
+        done
+        
+        # Si no encontramos, buscar cualquier archivo que contenga "client" o "server"
+        if [ -z "$CLIENT_FOUND" ]; then
+          CLIENT_FOUND=$(find build-arm/ -type f \( -name "*client*" -o -name "*Client*" \) 2>/dev/null | head -1)
+        fi
+        
+        if [ -z "$SERVER_FOUND" ]; then
+          SERVER_FOUND=$(find build-arm/ -type f \( -name "*server*" -o -name "*Server*" \) 2>/dev/null | head -1)
+        fi
+        
+        # Copiar lo encontrado
+        if [ -n "$CLIENT_FOUND" ]; then
+          echo "✅ Cliente encontrado: $CLIENT_FOUND"
+          cp "$CLIENT_FOUND" slipstream-client
           chmod +x slipstream-client
-          echo "✅ slipstream-client copiado"
+          echo "🔧 slipstream-client copiado"
           file slipstream-client
         fi
         
-        # Buscar servidor
-        if find build-arm/ -type f -executable -name "*server*" | grep -q .; then
-          SERVER=$(find build-arm/ -type f -executable -name "*server*" | head -1)
-          cp "$SERVER" slipstream-server
+        if [ -n "$SERVER_FOUND" ]; then
+          echo "✅ Servidor encontrado: $SERVER_FOUND"
+          cp "$SERVER_FOUND" slipstream-server
           chmod +x slipstream-server
-          echo "✅ slipstream-server copiado"
+          echo "🔧 slipstream-server copiado"
           file slipstream-server
         fi
         
-        # Si no hay nombres específicos, copiar primeros ejecutables
+        # Si no encontramos nada, copiar primeros ejecutables
         if [ ! -f "slipstream-client" ] && [ ! -f "slipstream-server" ]; then
-          EXES=$(find build-arm/ -type f -executable | head -2)
-          i=0
-          for exe in $EXES; do
-            if [ $i -eq 0 ]; then
-              cp "$exe" slipstream-client
-              chmod +x slipstream-client
-              echo "📦 slipstream-client: $exe"
-            elif [ $i -eq 1 ]; then
-              cp "$exe" slipstream-server
+          echo "⚠️  Buscando cualquier ejecutable..."
+          EXES=($(find build-arm/ -type f -executable 2>/dev/null))
+          
+          if [ ${#EXES[@]} -gt 0 ]; then
+            echo "Ejecutables disponibles: ${#EXES[@]}"
+            cp "${EXES[0]}" slipstream-client
+            chmod +x slipstream-client
+            echo "📦 Primer ejecutable como slipstream-client: ${EXES[0]}"
+            
+            if [ ${#EXES[@]} -gt 1 ]; then
+              cp "${EXES[1]}" slipstream-server
               chmod +x slipstream-server
-              echo "📦 slipstream-server: $exe"
+              echo "📦 Segundo ejecutable como slipstream-server: ${EXES[1]}"
             fi
-            ((i++))
-          done
+          fi
         fi
+        
+        # Resultado final
+        echo ""
+        echo "=== RESULTADO ==="
+        ls -la slipstream-* 2>/dev/null || echo "No se crearon binarios slipstream-*"
 
-    # 5. Subir binarios
-    - name: Subir binarios al repositorio
+    # 7. Subir binarios al repositorio
+    - name: Subir binarios
       if: success()
       run: |
+        # Verificar si hay binarios
         if [ ! -f "slipstream-client" ] && [ ! -f "slipstream-server" ]; then
-          echo "⚠️  No hay binarios para subir"
+          echo "⚠️  No se generaron binarios, saltando..."
           exit 0
         fi
         
+        # Configurar Git
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "GitHub Actions"
         
+        # Agregar binarios
         [ -f "slipstream-client" ] && git add slipstream-client
         [ -f "slipstream-server" ] && git add slipstream-server
         
+        # Commit y push
         if ! git diff --cached --quiet; then
-          git commit -m "⚙️  Binarios ARM32 nativos [ci skip]"
+          git commit -m "🚀 Binarios ARM32 compilados [ci skip]"
           git push
-          echo "✅ Binarios subidos"
+          echo "✅ Binarios subidos al repositorio"
+        else
+          echo "✅ Binarios ya estaban actualizados"
         fi
+
+    # 8. Crear artifact
+    - name: Crear artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: slipstream-arm32
+        path: |
+          slipstream-client
+          slipstream-server
+        retention-days: 90
+        if-no-files-found: warn

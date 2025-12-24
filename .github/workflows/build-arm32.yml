@@ -1,4 +1,4 @@
-name: Build slipstream for ARM 32-bit
+name: Compilar slipstream para ARM 32-bit
 
 on:
   push:
@@ -7,17 +7,17 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04  # Usa la versión más reciente
+    runs-on: ubuntu-24.04
     
     steps:
     # 1. Obtener código y submódulos
-    - name: Checkout repository with submodules
+    - name: Obtener código con submódulos
       uses: actions/checkout@v4
       with:
         submodules: 'recursive'
 
     # 2. INSTALACIÓN COMPLETA PARA ARM
-    - name: Install ARM cross-compilation toolchain
+    - name: Instalar herramientas para compilar en ARM
       run: |
         sudo apt-get update
         # Instalar TODO el entorno de compilación ARM
@@ -38,8 +38,8 @@ jobs:
         sudo mkdir -p /usr/arm-linux-gnueabi/include
         sudo ln -sf /usr/include/openssl /usr/arm-linux-gnueabi/include/openssl 2>/dev/null || true
 
-    # 3. Parchear para eliminar -Werror de forma AGRESIVA
-    - name: Patch build files to remove -Werror
+    # 3. Parchear para eliminar -Werror
+    - name: Parchear archivos para quitar -Werror
       run: |
         # Buscar y eliminar -Werror en TODOS los archivos
         find . -type f \( -name "CMakeLists.txt" -o -name "*.cmake" -o -name "*.mk" \) -exec sed -i 's/-Werror//g; s/Werror//g; s/add_compile_options.*Werror.*//g' {} \;
@@ -50,7 +50,7 @@ jobs:
         fi
 
     # 4. Configurar el proyecto con Meson
-    - name: Configure with Meson
+    - name: Configurar con Meson
       env:
         CC: arm-linux-gnueabi-gcc
         CXX: arm-linux-gnueabi-g++
@@ -89,20 +89,20 @@ jobs:
           -Ddefault_library=static
 
     # 5. Compilar con tolerancia a errores
-    - name: Compile project
+    - name: Compilar proyecto
       run: |
         # Intentar compilar normalmente primero
-        meson compile -C build -j 2 || echo "Continuing despite errors..."
+        meson compile -C build -j 2 || echo "Continuando a pesar de errores..."
         
         # Si falla, intentar con ninja directamente ignorando errores
         cd build && ninja -k 10 || true
 
     # 6. Verificar y preparar binarios
-    - name: Prepare binaries for download
+    - name: Preparar binarios para descarga
       run: |
         # Verificar que los binarios existen
         if [ -f "build/slipstream-client" ] && [ -f "build/slipstream-server" ]; then
-          echo "✅ Binarios creados exitosamente!"
+          echo "✅ ¡Binarios creados exitosamente!"
           
           # Verificar arquitectura
           echo "=== Verificación de Arquitectura ==="
@@ -114,23 +114,13 @@ jobs:
           cp build/slipstream-client slipstream-arm32/
           cp build/slipstream-server slipstream-arm32/
           
-          # Añadir script de instalación para Termux
-          cat > slipstream-arm32/install-termux.sh << 'EOF'
-          #!/data/data/com.termux/files/usr/bin/bash
-          echo "Instalando slipstream en Termux..."
-          chmod +x slipstream-client slipstream-server
-          echo "✅ Listo! Ejecuta: ./slipstream-client"
-          EOF
-          chmod +x slipstream-arm32/install-termux.sh
-          
           # Crear README
-          cat > slipstream-arm32/README.txt << 'EOF'
+          cat > slipstream-arm32/LEEME.txt << 'EOF'
           Slipstream compilado para ARM 32-bit (armv7)
           --------------------------------------------
           Archivos:
           - slipstream-client: Cliente DNS tunnel
           - slipstream-server: Servidor
-          - install-termux.sh: Script de instalación
           
           Para usar en Termux:
           1. chmod +x slipstream-client
@@ -149,7 +139,7 @@ jobs:
         fi
 
     # 7. Subir binarios como artefacto
-    - name: Upload binaries
+    - name: Subir binarios
       uses: actions/upload-artifact@v4
       with:
         name: slipstream-arm32-package
